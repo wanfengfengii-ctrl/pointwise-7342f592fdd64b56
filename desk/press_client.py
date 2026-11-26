@@ -20,6 +20,8 @@ class PressClient(Protocol):
     def knows_press(self, press_id: str) -> bool: ...
     def enqueue(self, press_id: str, batch_id: str, plan: dict) -> dict: ...
     def read_run(self, press_id: str, run_id: str) -> dict: ...
+    def prepare_takeover(self, press_id: str, run_id: str, request_id: str) -> dict: ...
+    def sync_eligibility(self, press_id: str, run_id: str, numbers: list[int]) -> dict: ...
 
 
 def request_json(address: str, path: str, body: dict | None = None) -> dict:
@@ -62,3 +64,11 @@ class HttpPressClient:
 
     def read_run(self, press_id: str, run_id: str) -> dict:
         return request_json(self._address(press_id), '/runs/' + quote(run_id, safe=''))
+
+    def prepare_takeover(self, press_id: str, run_id: str, request_id: str) -> dict:
+        path = '/runs/' + quote(run_id, safe='') + '/takeover'
+        return request_json(self._address(press_id), path, {'request_id': request_id})
+
+    def sync_eligibility(self, press_id: str, run_id: str, numbers: list[int]) -> dict:
+        path = '/runs/' + quote(run_id, safe='') + '/eligibility'
+        return request_json(self._address(press_id), path, {'numbers': numbers})

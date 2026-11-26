@@ -24,6 +24,13 @@ def init_runs(db: sqlite3.Connection):
         request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, number INTEGER NOT NULL,
         stage TEXT NOT NULL, action_id TEXT NOT NULL UNIQUE, result TEXT
     )''')
+    db.execute('''CREATE TABLE IF NOT EXISTS run_handoffs (
+        run_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, result TEXT
+    )''')
+    db.execute('''CREATE TABLE IF NOT EXISTS discarded_actions (
+        request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, number INTEGER NOT NULL,
+        action_id TEXT NOT NULL UNIQUE, result TEXT NOT NULL
+    )''')
 
 
 def _read_request(db, request_id):
@@ -56,6 +63,10 @@ def advance_run(db: sqlite3.Connection, device: SimulatedPress, run_id: str, req
             stage = DuplexStage(target)
             if work.pending_request != request_id:
                 raise RunConflict('action_not_reserved')
+            if not work.enabled:
+                discarded = db.execute(
+                    'SELECT 1 FROM discarded_actions WHERE request_id = ?', (request_id,)).fetchone()
+                raise RunConflict('action_discarded' if discarded is not None else 'action_revoked')
             validate_stage_result(work.stage, stage)
 
     sheet = run.plan.sheets[work.number - run.plan.start]

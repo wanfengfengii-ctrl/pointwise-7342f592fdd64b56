@@ -12,6 +12,7 @@ from press.duplex import RunConflict
 from press.queue import enqueue_plan, init_queue
 from press.runs import advance_run, init_runs, read_run_result
 from press.simulator import DevicePaused, SimulatedPress
+from press.takeover import discard_ejection, prepare_run_takeover, sync_run_eligibility
 
 
 class DropReply(Exception):
@@ -94,11 +95,23 @@ class PressRequestHandler(JsonRequestHandler):
                     if body['press_id'] != device.press_id:
                         raise KeyError('unknown_press')
                     batch_id = require_identifier(body['batch_id'], 'invalid_batch_id')
-                    result = enqueue_plan(db, device.press_id, batch_id, plan_from_record(body['plan'])).reference()
+                    result = enqueue_plan(db, device.press_id, batch_id,
+                                          plan_from_record(body['plan'])).reference()
                 elif len(path) == 3 and path[0] == 'runs' and path[2] == 'advance':
                     require_fields(body, 'request_id')
                     request_id = require_identifier(body['request_id'], 'invalid_request_id')
                     result = advance_run(db, device, path[1], request_id)
+                elif len(path) == 3 and path[0] == 'runs' and path[2] == 'discard':
+                    require_fields(body, 'request_id')
+                    request_id = require_identifier(body['request_id'], 'invalid_request_id')
+                    result = discard_ejection(db, device, path[1], request_id)
+                elif len(path) == 3 and path[0] == 'runs' and path[2] == 'takeover':
+                    require_fields(body, 'request_id')
+                    request_id = require_identifier(body['request_id'], 'invalid_request_id')
+                    result = prepare_run_takeover(db, device, path[1], request_id)
+                elif len(path) == 3 and path[0] == 'runs' and path[2] == 'eligibility':
+                    require_fields(body, 'numbers')
+                    result = sync_run_eligibility(db, device, path[1], body['numbers'])
                 else:
                     raise KeyError('unknown_route')
         except RunConflict as exc:

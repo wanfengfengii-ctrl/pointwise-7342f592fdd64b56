@@ -14,6 +14,8 @@ from desk.dispatch import dispatch_batch
 from desk.press_client import HttpPressClient, PressClient, PressResponseError, PressTransportError
 from desk.progress import read_progress
 from desk.receipts import init_dispatch_receipts
+from desk.takeover import get_takeover_view, submit_takeover
+from desk.takeover_store import init_takeover_store
 from editions.drafts import parse_draft
 from editions.paper import require_fields
 from editions.proofs import ProofTemplate
@@ -27,6 +29,7 @@ def initialize_desk(db_path):
         init_revisions(db)
         init_batches(db)
         init_dispatch_receipts(db)
+        init_takeover_store(db)
         init_issued_batches(db)
 
 
@@ -54,6 +57,8 @@ class DeskRequestHandler(JsonRequestHandler):
                 return 200, get_revision(db, path[1]).to_record()
             if path[0] == 'batches':
                 return 200, get_batch(db, path[1]).to_record()
+        if len(path) == 4 and path[0] == 'batches' and path[2] == 'takeover':
+            return 200, get_takeover_view(db, self.server.client, path[1], path[3])
         if len(path) == 3 and path[0] == 'batches':
             batch_id, action = path[1:]
             if action == 'progress':
@@ -88,6 +93,13 @@ class DeskRequestHandler(JsonRequestHandler):
                 press_id = require_identifier(body['press_id'], 'invalid_press_id')
                 request_id = require_identifier(body['request_id'], 'invalid_request_id')
                 return 200, dispatch_batch(db, self.server.client, batch_id, press_id, request_id)
+            if action == 'takeover':
+                require_fields(body, 'request_id', 'from_press', 'to_press')
+                request_id = require_identifier(body['request_id'], 'invalid_request_id')
+                from_press = require_identifier(body['from_press'], 'invalid_press_id')
+                to_press = require_identifier(body['to_press'], 'invalid_press_id')
+                return 200, submit_takeover(db, self.server.client, batch_id,
+                                            request_id, from_press, to_press)
             if action == 'inspection':
                 require_fields(body, 'measurements')
                 return 200, asdict(inspect_batch(db, self.server.client, batch_id, body['measurements']))

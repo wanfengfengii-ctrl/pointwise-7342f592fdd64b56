@@ -55,6 +55,22 @@ class SimulatedPress:
                 seq INTEGER PRIMARY KEY, action_id TEXT NOT NULL UNIQUE,
                 batch_id TEXT NOT NULL, run_id TEXT NOT NULL, number INTEGER NOT NULL
             )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS device_number_fences (
+                run_id TEXT NOT NULL, number INTEGER NOT NULL, reason TEXT NOT NULL,
+                PRIMARY KEY(run_id, number)
+            )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS device_discards (
+                action_id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
+                run_id TEXT NOT NULL, number INTEGER NOT NULL, result TEXT NOT NULL
+            )''')
+
+    def _fence_error(self, db, run_id: str, number: int) -> RunConflict | None:
+        row = db.execute('SELECT reason FROM device_number_fences WHERE run_id = ? AND number = ?',
+                         (run_id, number)).fetchone()
+        if row is None:
+            return None
+        error = 'action_discarded' if row[0] == 'discarded' else 'action_revoked'
+        return RunConflict(error)
 
     @staticmethod
     def _saved_result(action, row):
@@ -72,7 +88,18 @@ class SimulatedPress:
             if row is not None:
                 if row[1] != body:
                     raise RunConflict('device_action_conflict')
-                return self._saved_result(action, row)
+                saved = self._saved_result(action, row)
+                if saved is not None:
+                    return saved
+                if action.stage == DuplexStage.EJECTED:
+                    fenced = self._fence_error(db, action.run_id, action.number)
+                    if fenced is not None:
+                        raise fenced
+                return None
+            if action.stage == DuplexStage.EJECTED:
+                fenced = self._fence_error(db, action.run_id, action.number)
+                if fenced is not None:
+                    raise fenced
             db.execute('''INSERT INTO device_actions(action_id, run_id, number, stage, body)
                           VALUES (?, ?, ?, ?, ?)''',
                        (action.action_id, action.run_id, action.number, action.stage.value, body))
@@ -107,6 +134,10 @@ class SimulatedPress:
             prior = self._saved_result(action, row)
             if prior is not None:
                 return prior
+            if action.stage == DuplexStage.EJECTED:
+                fenced = self._fence_error(db, action.run_id, action.number)
+                if fenced is not None:
+                    raise fenced
             self._validate_effect(db, action)
             ejection_id = None
             if action.stage == DuplexStage.EJECTED:
@@ -120,6 +151,64 @@ class SimulatedPress:
         if self.after_effect is not None:
             self.after_effect(action, result)
         return result
+
+    def fence_numbers_for_takeover(self, run_id: str, numbers) -> tuple[int, ...]:
+        planned = tuple(numbers)
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            actual = {row[0] for row in db.execute(
+                'SELECT number FROM device_ejections WHERE run_id = ?', (run_id,))}
+            live_eject = {row[0] for row in db.execute('''
+                SELECT a.number
+                FROM device_actions AS a
+                LEFT JOIN device_number_fences AS f
+                  ON f.run_id = a.run_id AND f.number = a.number
+                WHERE a.run_id = ? AND a.stage = ? AND a.result IS NULL
+                  AND f.number IS NULL
+            ''', (run_id, DuplexStage.EJECTED.value))}
+            safe = tuple(number for number in planned
+                         if number not in actual and number not in live_eject)
+            db.executemany('''INSERT OR IGNORE INTO device_number_fences(run_id, number, reason)
+                              VALUES (?, ?, 'taken_over')''',
+                           ((run_id, number) for number in safe))
+        return safe
+
+    def discard_ejection(self, *, action_id: str, request_id: str,
+                         run_id: str, number: int) -> dict:
+        receipt = {'request_id': request_id, 'run_id': run_id,
+                   'number': number, 'state': 'discarded'}
+        body = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT stage, result, body FROM device_actions WHERE action_id = ?',
+                             (action_id,)).fetchone()
+            if row is None:
+                raise RunConflict('ejection_not_arrived')
+            stage, result, action_body = row
+            action_data = json.loads(action_body)
+            if (stage != DuplexStage.EJECTED.value
+                    or action_data.get('request_id') != request_id
+                    or action_data.get('run_id') != run_id
+                    or action_data.get('number') != number):
+                raise RunConflict('discard_action_mismatch')
+            prior_discard = db.execute('SELECT result FROM device_discards WHERE action_id = ?',
+                                       (action_id,)).fetchone()
+            if prior_discard is not None:
+                return json.loads(prior_discard[0])
+            if result is not None:
+                raise RunConflict('ejection_already_occurred')
+            if db.execute('SELECT 1 FROM device_ejections WHERE action_id = ?',
+                          (action_id,)).fetchone() is not None:
+                raise RunConflict('ejection_already_occurred')
+            db.execute('''INSERT INTO device_discards(action_id, request_id, run_id, number, result)
+                          VALUES (?, ?, ?, ?, ?)''',
+                       (action_id, request_id, run_id, number, body))
+            db.execute('''INSERT INTO device_number_fences(run_id, number, reason)
+                          VALUES (?, ?, 'discarded')
+                          ON CONFLICT(run_id, number)
+                          DO UPDATE SET reason = excluded.reason''',
+                       (run_id, number))
+        return receipt
 
     def ejection_events(self, run_id: str | None = None) -> list[dict]:
         sql = 'SELECT seq, action_id, batch_id, run_id, number FROM device_ejections'
